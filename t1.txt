@@ -256,6 +256,15 @@ class ContingencyWorkflow:
             )
         if options.long_term_p2:
             required.append(self.resources_dir / "UG_Lines.aux")
+            required.append(self.resources_dir / "P2_All_Except_BF.aux")
+            required.extend(
+                Path(path)
+                for path in paths_for_case(
+                    self.settings.aux_files,
+                    JOIN_ACTIVE_CONTINGENCY,
+                    str(case),
+                )
+            )
         if options.extreme_double_branch:
             required.append(self.resources_dir / "EE_DBL_Branch.aux")
         if options.extreme_double_bus:
@@ -348,6 +357,13 @@ class ContingencyWorkflow:
 
         return SettingsStore().distributed_aux_path
 
+    def _temporary_contingency_aux_path(self) -> Path:
+        from .settings import SettingsStore
+
+        store = SettingsStore()
+        store.base_dir.mkdir(parents=True, exist_ok=True)
+        return store.base_dir / "P_All.aux"
+
     def build_contingencies(self, case: Path, options: ContingencyOptions) -> None:
         self.log("Clearing contingencies already stored in the case.")
         self.client.run_script_command('Delete(Contingency, "");')
@@ -374,11 +390,29 @@ class ContingencyWorkflow:
 
         if options.long_term_p2:
             ug_file = self.resources_dir / "UG_Lines.aux"
+            saved_contingencies: Path | None = None
             if options.n1 or options.n11:
-                escaped = str(ug_file).replace('"', '""')
-                self.client.run_script_command(f'CTGJoinActiveCTGs(NO,YES,NO,"{escaped}");')
-            else:
-                self._apply_file(ug_file)
+                saved_contingencies = self._temporary_contingency_aux_path()
+                if saved_contingencies.exists():
+                    saved_contingencies.unlink()
+                escaped_saved = str(saved_contingencies).replace('"', '""')
+                self.log("Temporarily saving the existing N-1/N-1-1 contingency set.")
+                self.client.run_script_command(
+                    f'SaveData("{escaped_saved}", AUX, CONTINGENCY,'
+                    '[CTGLabel],[CTGElement],,[],NO);'
+                )
+
+            self.client.run_script_command('Delete(Contingency, "");')
+            self._apply_file(self.resources_dir / "P2_All_Except_BF.aux")
+            self._apply_category(case, JOIN_ACTIVE_CONTINGENCY)
+            escaped_ug = str(ug_file).replace('"', '""')
+            self.client.run_script_command(
+                f'CTGJoinActiveCTGs(NO,YES,NO,"{escaped_ug}");'
+            )
+
+            if saved_contingencies is not None:
+                self.log("Reloading the saved N-1/N-1-1 contingency set.")
+                self._apply_file(saved_contingencies)
 
         if options.extreme_double_branch:
             self._apply_file(self.resources_dir / "EE_DBL_Branch.aux")
