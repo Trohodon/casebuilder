@@ -22,6 +22,7 @@ from .settings import AppSettings
 from .distributed import write_distributed_aux
 
 LogCallback = Callable[[str], None]
+BaseCaseDecision = Callable[[Path, int], bool]
 BRANCH_RESULT_FIELDS = (
     "BusNum",
     "BusName",
@@ -119,6 +120,10 @@ class AnalysisResult:
     outputs: tuple[Path, ...]
 
 
+class BaseCaseViolationError(PowerWorldError):
+    """Raised when the user declines to continue after the base-case check."""
+
+
 class ContingencyWorkflow:
     def __init__(
         self,
@@ -127,11 +132,13 @@ class ContingencyWorkflow:
         *,
         resources_dir: Path | None = None,
         log: LogCallback | None = None,
+        confirm_basecase_violations: BaseCaseDecision | None = None,
     ) -> None:
         self.client = client
         self.settings = settings
         self.resources_dir = resources_dir or Path(__file__).resolve().parent.parent / "Resources"
         self.log = log or (lambda _message: None)
+        self.confirm_basecase_violations = confirm_basecase_violations
 
     def prepare_combined_case(
         self,
@@ -190,16 +197,14 @@ class ContingencyWorkflow:
         output_root = Path(output_dir)
         output_root.mkdir(parents=True, exist_ok=True)
         self.validate_inputs(case, contingencies, include_basecase=analysis.check_basecase)
+        if analysis.check_basecase and analysis.mode == "dc_ac":
+            self._check_basecase(case, analysis)
         outputs: list[Path] = []
         groups = self._selected_groups(contingencies)
         for index, (label, group) in enumerate(groups, start=1):
             self.log(f"Starting contingency group {index} of {len(groups)}: {label}")
             self._open_and_condition(case)
             try:
-                if analysis.check_basecase and analysis.mode == "dc_ac":
-                    self.log("Checking the base case for violations.")
-                    self._apply_file(self.resources_dir / "Basecase.aux")
-                    self.client.run_script_command('CTGSolve("BASECASE");')
                 self.build_contingencies(case, group)
                 if analysis.delete_skipped:
                     # The legacy workflow removes contingencies already marked SKIP
@@ -226,6 +231,61 @@ class ContingencyWorkflow:
             finally:
                 self._close_safely()
         return AnalysisResult(case, tuple(outputs))
+
+    def _check_basecase(self, case: Path, options: AnalysisOptions) -> int:
+        """Run the legacy BASECASE contingency once before any selected groups."""
+        self.log(f"Checking {case.name} for base-case violations before analysis.")
+        self._open_and_condition(case)
+        try:
+            self._apply_file(self.resources_dir / "Basecase.aux")
+            line_percent = options.ac_monitor_percent
+            if not options.full_ac:
+                line_percent = min(options.dc_monitor_percent, options.ac_monitor_percent)
+            self.client.change_parameters_single(
+                "LimitSet",
+                ("LSNum", "LSName", "LSLinePercent"),
+                ("1", "Default", str(line_percent)),
+            )
+            self.client.run_script_command('CTGSolve("BASECASE");')
+            result = self.client.get_parameters_multiple(
+                "Contingency", ("CTGLabel", "CTGSkip", "CTGViol"), ""
+            )
+            try:
+                labels, _skipped, violations = result[1]
+            except (IndexError, TypeError, ValueError) as exc:
+                raise PowerWorldError(
+                    "PowerWorld returned an unexpected BASECASE result table."
+                ) from exc
+
+            violation_count: int | None = None
+            for label, value in zip(labels, violations):
+                if str(label).strip().casefold() == "basecase":
+                    if value is None or str(value).strip() == "":
+                        violation_count = 0
+                    else:
+                        violation_count = int(float(str(value)))
+                    break
+            if violation_count is None:
+                raise PowerWorldError(
+                    "PowerWorld did not return the BASECASE contingency after loading Basecase.aux."
+                )
+
+            self.log(f"Base case violations found: {violation_count}")
+            if violation_count > 0:
+                should_continue = (
+                    self.confirm_basecase_violations(case, violation_count)
+                    if self.confirm_basecase_violations is not None
+                    else False
+                )
+                if not should_continue:
+                    raise BaseCaseViolationError(
+                        f"Analysis stopped because {case.name} has {violation_count} base-case "
+                        "violation(s). Correct them, or turn off the base-case check to continue."
+                    )
+                self.log("Continuing after the base-case violation warning.")
+            return violation_count
+        finally:
+            self._close_safely()
 
     def validate_inputs(
         self,
