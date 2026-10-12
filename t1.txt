@@ -59,6 +59,18 @@ class AnalysisWorkflowTests(unittest.TestCase):
             self.assertIn("CTGJoinActiveCTGs(NO,NO,YES);", scripts)
             self.assertIn("CTGSolveAll(NO);", scripts)
             self.assertIn(
+                'SetData(CTG_Options_Value, [Option, Value], ["ChkShunts", "NO"]);',
+                scripts,
+            )
+            self.assertIn(
+                'SetData(CTG_Options_Value, [Option, Value], ["ChkTaps", "NO"]);',
+                scripts,
+            )
+            self.assertIn(
+                'SetData(CTG_Options_Value, [Option, Value], ["LTCTapBalance", "NO"]);',
+                scripts,
+            )
+            self.assertIn(
                 'SetData(Contingency, [CTGSkip], ["YES"], "No_Violations");',
                 scripts,
             )
