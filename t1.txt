@@ -1,0 +1,476 @@
+"""Contingency construction and first-pass PowerWorld analysis workflow."""
+
+from __future__ import annotations
+
+import csv
+from dataclasses import dataclass, replace
+from pathlib import Path
+from typing import Callable
+
+from .aux_files import (
+    COMMON_STRUCTURE,
+    GENERIC_CONTINGENCY,
+    GENERIC_CONTINGENCY_POST,
+    JOIN_ACTIVE_CONTINGENCY,
+    MANUAL,
+    OPERATING_GUIDE,
+    paths_for_case,
+)
+from .powerworld import PowerWorldClient, PowerWorldError
+from .preparation import apply_input_file
+from .settings import AppSettings
+from .distributed import write_distributed_aux
+
+LogCallback = Callable[[str], None]
+BRANCH_RESULT_FIELDS = (
+    "BusNum",
+    "BusName",
+    "BusNum:1",
+    "BusName:1",
+    "LineCircuit",
+    "LineXfmr",
+    "CTGViol",
+    "LineMaxPercentContingency",
+)
+CSV_RESULT_FIELDS = (
+    "CTGLabel",
+    "LimViolID",
+    "LimViolCat",
+    "LimViolValue",
+    "LimViolLimit",
+    "LimViolPct",
+    "LimViolCTGSpecifiedLimit",
+    "CTGSolved",
+)
+
+
+@dataclass(slots=True)
+class ContingencyOptions:
+    n1: bool = True
+    n11: bool = True
+    long_term_p2: bool = True
+    extreme_double_bus: bool = False
+    extreme_double_branch: bool = False
+    extreme_bus_branch: bool = False
+    extreme_p1_p7: bool = False
+    use_model_build: bool = False
+    write_n1_models: bool = False
+
+    def validate(self) -> None:
+        if not any(
+            (
+                self.n1,
+                self.n11,
+                self.long_term_p2,
+                self.extreme_double_bus,
+                self.extreme_double_branch,
+                self.extreme_bus_branch,
+                self.extreme_p1_p7,
+            )
+        ):
+            raise ValueError("Select at least one contingency group.")
+        if self.write_n1_models and not self.use_model_build:
+            raise ValueError("N-1 model creation requires the Model Build method.")
+
+
+@dataclass(slots=True)
+class AnalysisOptions:
+    mode: str = "dc_ac"
+    dc_monitor_percent: int = 80
+    ac_monitor_percent: int = 90
+    screen_tdf_cutoff: float = 2.0
+    screen_volt_cutoff: float = 2.5
+    do_not_rereport: bool = True
+    rereport_tdf_cutoff: float = 0.5
+    rereport_volt_cutoff: float = 0.5
+    check_basecase: bool = True
+    full_ac: bool = False
+    contingencies_per_file: int = 80_000
+    use_distributed: bool = True
+    delete_skipped: bool = True
+    create_pwb: bool = True
+    create_aux: bool = False
+    create_csv: bool = False
+
+    def validate(self) -> None:
+        if self.mode not in {"dc_ac", "ac_screen"}:
+            raise ValueError("Unknown analysis mode.")
+        if not 0 <= self.dc_monitor_percent <= 32767:
+            raise ValueError("DC CA Lim Mon % must be between 0 and 32767.")
+        if not 0 <= self.ac_monitor_percent <= 32767:
+            raise ValueError("AC CA Lim Mon % must be between 0 and 32767.")
+        if self.mode == "ac_screen" and not 0 < self.screen_tdf_cutoff <= 100:
+            raise ValueError("Screen TDF cutoff must be greater than 0 and no more than 100.")
+        if self.mode == "ac_screen" and not 0 < self.screen_volt_cutoff <= 20:
+            raise ValueError("Screen Volt cutoff must be greater than 0 and no more than 20.")
+        if self.do_not_rereport and self.rereport_tdf_cutoff < 0:
+            raise ValueError("TDF % cutoff cannot be negative.")
+        if self.do_not_rereport and self.rereport_volt_cutoff < 0:
+            raise ValueError("Volt % cutoff cannot be negative.")
+        if self.full_ac and self.contingencies_per_file < 1:
+            raise ValueError("Contingencies/file must be a positive integer.")
+        if not any((self.create_pwb, self.create_aux, self.create_csv)):
+            raise ValueError("Select at least one output type.")
+
+
+@dataclass(slots=True)
+class AnalysisResult:
+    case_path: Path
+    outputs: tuple[Path, ...]
+
+
+class ContingencyWorkflow:
+    def __init__(
+        self,
+        client: PowerWorldClient,
+        settings: AppSettings,
+        *,
+        resources_dir: Path | None = None,
+        log: LogCallback | None = None,
+    ) -> None:
+        self.client = client
+        self.settings = settings
+        self.resources_dir = resources_dir or Path(__file__).resolve().parent.parent / "Resources"
+        self.log = log or (lambda _message: None)
+
+    def prepare_combined_case(
+        self,
+        case_path: str | Path,
+        output_path: str | Path,
+        contingencies: ContingencyOptions,
+    ) -> Path:
+        contingencies.validate()
+        case = Path(case_path)
+        destination = Path(output_path)
+        self.validate_inputs(case, contingencies)
+        self._open_and_condition(case)
+        try:
+            self.build_contingencies(case, contingencies)
+            self.log(f"Saving prepared contingency case: {destination}")
+            self.client.save_case(destination, "PWB", True)
+            return destination
+        finally:
+            self._close_safely()
+
+    def write_pti_contingencies(
+        self,
+        case_path: str | Path,
+        output_path: str | Path,
+        contingencies: ContingencyOptions,
+        *,
+        truncate_labels: bool = False,
+    ) -> Path:
+        contingencies.validate()
+        case = Path(case_path)
+        destination = Path(output_path)
+        self.validate_inputs(case, contingencies)
+        self._open_and_condition(case)
+        try:
+            self.build_contingencies(case, contingencies)
+            escaped = str(destination).replace('"', '""')
+            truncate = "YES" if truncate_labels else "NO"
+            self.client.run_script_command(f'CTGWriteFilePTI("{escaped}","Name12","{truncate}");')
+            self.log(f"PTI contingency file written: {destination}")
+            return destination
+        finally:
+            self._close_safely()
+
+    def run_analysis(
+        self,
+        case_path: str | Path,
+        output_dir: str | Path,
+        contingencies: ContingencyOptions,
+        analysis: AnalysisOptions,
+    ) -> AnalysisResult:
+        contingencies.validate()
+        analysis.validate()
+        case = Path(case_path)
+        output_root = Path(output_dir)
+        output_root.mkdir(parents=True, exist_ok=True)
+        self.validate_inputs(case, contingencies, include_basecase=analysis.check_basecase)
+        outputs: list[Path] = []
+        groups = self._selected_groups(contingencies)
+        for index, (label, group) in enumerate(groups, start=1):
+            self.log(f"Starting contingency group {index} of {len(groups)}: {label}")
+            self._open_and_condition(case)
+            try:
+                if analysis.check_basecase and analysis.mode == "dc_ac":
+                    self.log("Checking the base case for violations.")
+                    self._apply_file(self.resources_dir / "Basecase.aux")
+                    self.client.run_script_command('CTGSolve("BASECASE");')
+                self.build_contingencies(case, group)
+                force_ac = label in {"P1,2,4,7", "LongTerm"}
+                self._configure_analysis(analysis, force_ac=force_ac)
+                self.log(f"Running contingency analysis for {label}.")
+                self._solve_analysis(analysis)
+                if analysis.delete_skipped:
+                    self.client.run_script_command('Delete(Contingency, "SKIPPED");')
+                if analysis.full_ac or (analysis.mode == "dc_ac" and force_ac):
+                    run_type = "ACCA"
+                elif analysis.mode == "dc_ac":
+                    run_type = "DCwACver"
+                else:
+                    run_type = "scrCA"
+                base = output_root / f"{case.stem}_{run_type}_{label}"
+                outputs.extend(self._write_outputs(base, analysis))
+            finally:
+                self._close_safely()
+        return AnalysisResult(case, tuple(outputs))
+
+    def validate_inputs(
+        self,
+        case: Path,
+        options: ContingencyOptions,
+        *,
+        include_basecase: bool = False,
+    ) -> None:
+        required: list[Path] = [case, self.resources_dir / "Conts_Filters.aux"]
+        if include_basecase:
+            required.append(self.resources_dir / "Basecase.aux")
+        if options.n1 or options.n11 or options.extreme_p1_p7:
+            required.append(self.resources_dir / "P1_All_Except_CB-CB.aux")
+            required.extend(
+                Path(path)
+                for path in paths_for_case(self.settings.aux_files, GENERIC_CONTINGENCY, str(case))
+            )
+        if options.n11:
+            required.append(
+                self.resources_dir
+                / ("N-2_Branches&TFMRs.aux" if options.use_model_build else "P2_All_Except_BF.aux")
+            )
+            if options.use_model_build:
+                required.append(self.resources_dir / "P2_All_Except_BF.aux")
+            for category in (JOIN_ACTIVE_CONTINGENCY, GENERIC_CONTINGENCY_POST):
+                required.extend(
+                    Path(path)
+                    for path in paths_for_case(self.settings.aux_files, category, str(case))
+                )
+        if options.long_term_p2:
+            required.append(self.resources_dir / "UG_Lines.aux")
+        if options.extreme_double_branch:
+            required.append(self.resources_dir / "EE_DBL_Branch.aux")
+        if options.extreme_double_bus:
+            required.append(self.resources_dir / "EE_DBL_Bus.aux")
+        if options.extreme_bus_branch:
+            required.append(self.resources_dir / "P2_All_Except_BF.aux")
+        for category in (MANUAL, OPERATING_GUIDE):
+            required.extend(
+                Path(path)
+                for path in paths_for_case(self.settings.aux_files, category, str(case))
+            )
+        if options.extreme_p1_p7:
+            required.extend(
+                Path(path)
+                for path in paths_for_case(self.settings.aux_files, COMMON_STRUCTURE, str(case))
+            )
+
+        missing = list(dict.fromkeys(path for path in required if not path.is_file()))
+        if missing:
+            listing = "\n".join(f"  {path}" for path in missing)
+            raise PowerWorldError(f"Required input files are missing or unavailable:\n{listing}")
+
+    @staticmethod
+    def _selected_groups(options: ContingencyOptions) -> list[tuple[str, ContingencyOptions]]:
+        empty = replace(
+            options,
+            n1=False,
+            n11=False,
+            long_term_p2=False,
+            extreme_double_bus=False,
+            extreme_double_branch=False,
+            extreme_bus_branch=False,
+            extreme_p1_p7=False,
+        )
+        groups: list[tuple[str, ContingencyOptions]] = []
+        if options.n1:
+            groups.append(("P1,2,4,7", replace(empty, n1=True)))
+        if options.n11:
+            groups.append(("P1-7", replace(empty, n11=True)))
+        if options.long_term_p2:
+            groups.append(("LongTerm", replace(empty, long_term_p2=True)))
+        if options.extreme_bus_branch:
+            groups.append(("EE_BusBranch", replace(empty, extreme_bus_branch=True)))
+        if options.extreme_double_branch:
+            groups.append(("EE_DBL_Branch", replace(empty, extreme_double_branch=True)))
+        if options.extreme_double_bus:
+            groups.append(("EE_DBL_Bus", replace(empty, extreme_double_bus=True)))
+        if options.extreme_p1_p7:
+            groups.append(("EE_P1+P7", replace(empty, extreme_p1_p7=True)))
+        return groups
+
+    def _write_outputs(self, base: Path, analysis: AnalysisOptions) -> list[Path]:
+        outputs: list[Path] = []
+        if analysis.create_pwb:
+            pwb = base.with_suffix(".PWB")
+            self.client.save_case(pwb, "PWB", True)
+            outputs.append(pwb)
+            self.log(f"PWB output written: {pwb}")
+        if analysis.create_aux:
+            aux = base.with_suffix(".AUX")
+            self.client.write_aux_file(aux, "", "contingency", False, "all")
+            self.client.write_aux_file(aux, "", "branch", True, BRANCH_RESULT_FIELDS)
+            outputs.append(aux)
+            self.log(f"AUX output written: {aux}")
+        if analysis.create_csv:
+            csv_path = base.with_suffix(".CSV")
+            self._write_csv(csv_path)
+            outputs.append(csv_path)
+            self.log(f"CSV output written: {csv_path}")
+        return outputs
+
+    def _open_and_condition(self, case: Path) -> None:
+        if not case.is_file():
+            raise PowerWorldError(f"The case file does not exist: {case}")
+        self.log(f"Opening case: {case}")
+        self.client.open_case(case)
+        try:
+            if self.settings.use_distributed:
+                distributed = self.settings_store_aux_path()
+                write_distributed_aux(distributed, self.settings.distributed_config())
+                self._apply_file(distributed)
+            for path in paths_for_case(self.settings.aux_files, MANUAL, str(case)):
+                self._apply_file(path)
+            self.client.run_script_command("SolvePowerFlow;")
+        except Exception:
+            self._close_safely()
+            raise
+
+    def settings_store_aux_path(self) -> Path:
+        from .settings import SettingsStore
+
+        return SettingsStore().distributed_aux_path
+
+    def build_contingencies(self, case: Path, options: ContingencyOptions) -> None:
+        self.log("Clearing contingencies already stored in the case.")
+        self.client.run_script_command('Delete(Contingency, "");')
+
+        if options.n1 or options.n11 or options.extreme_p1_p7:
+            self._apply_file(self.resources_dir / "P1_All_Except_CB-CB.aux")
+            self._apply_category(case, GENERIC_CONTINGENCY)
+
+        if options.n11:
+            if options.use_model_build:
+                self.log("Using the model-build N-1-1 path.")
+                self._apply_file(self.resources_dir / "N-2_Branches&TFMRs.aux")
+            else:
+                self.log("Joining active N-1 contingencies to build N-1-1 contingencies.")
+                self.client.run_script_command("CTGJoinActiveCTGs(NO,NO,YES);")
+            self._apply_file(self.resources_dir / "P2_All_Except_BF.aux")
+            self._apply_category(case, JOIN_ACTIVE_CONTINGENCY)
+            self._apply_category(case, GENERIC_CONTINGENCY_POST)
+
+        if options.long_term_p2:
+            ug_file = self.resources_dir / "UG_Lines.aux"
+            if options.n1 or options.n11:
+                escaped = str(ug_file).replace('"', '""')
+                self.client.run_script_command(f'CTGJoinActiveCTGs(NO,YES,NO,"{escaped}");')
+            else:
+                self._apply_file(ug_file)
+
+        if options.extreme_double_branch:
+            self._apply_file(self.resources_dir / "EE_DBL_Branch.aux")
+        if options.extreme_double_bus:
+            self._apply_file(self.resources_dir / "EE_DBL_Bus.aux")
+        if options.extreme_bus_branch:
+            self._apply_file(self.resources_dir / "P2_All_Except_BF.aux")
+        if options.extreme_p1_p7:
+            self._apply_category(case, COMMON_STRUCTURE, join_active=True)
+
+        self._apply_category(case, OPERATING_GUIDE)
+        self._apply_file(self.resources_dir / "Conts_Filters.aux")
+
+    def _configure_analysis(self, options: AnalysisOptions, *, force_ac: bool = False) -> None:
+        calculation_method = (
+            "0" if options.full_ac or options.mode == "ac_screen" or force_ac else "1"
+        )
+        self.client.change_parameters_single(
+            "Ctg_Options",
+            ("CTG_CalculationMethod",),
+            (calculation_method,),
+        )
+        monitor_percent = options.ac_monitor_percent if calculation_method == "0" else options.dc_monitor_percent
+        self.client.change_parameters_single(
+            "LimitSet",
+            ("LSNum", "LSName", "LSLinePercent"),
+            ("1", "Default", str(monitor_percent)),
+        )
+        self.client.change_parameters_single(
+            "Ctg_Options",
+            ("CTG_WhatToDoWithBC", "CTG_BCFlows", "CTG_BCLowVolt", "CTG_BCHighVolt"),
+            (
+                "2" if options.do_not_rereport else "1",
+                str(options.rereport_tdf_cutoff),
+                str(options.rereport_volt_cutoff / 100),
+                str(options.rereport_volt_cutoff / 100),
+            ),
+        )
+
+    def _solve_analysis(self, options: AnalysisOptions) -> None:
+        distributed = "YES" if options.use_distributed else "NO"
+        if not options.full_ac:
+            self.client.run_script_command(f"CTGSolveAll({distributed});")
+            return
+
+        fields = ("CTGLabel", "CTGSkip", "CTGViol", "CTGSolved")
+        result = self.client.get_parameters_multiple("Contingency", fields, "")
+        try:
+            labels = list(result[1][0])
+        except (IndexError, TypeError) as exc:
+            raise PowerWorldError("PowerWorld returned an unexpected contingency list.") from exc
+        if not labels:
+            raise PowerWorldError("PowerWorld did not create any contingencies to analyze.")
+
+        batch_size = options.contingencies_per_file
+        batch_count = (len(labels) + batch_size - 1) // batch_size
+        for batch_index in range(batch_count):
+            first = batch_index * batch_size
+            stop = min(first + batch_size, len(labels))
+            self.log(
+                f"Running Full AC batch {batch_index + 1} of {batch_count} "
+                f"(contingencies {first + 1}-{stop})."
+            )
+            for index, label in enumerate(labels):
+                skip = "NO" if first <= index < stop else "YES"
+                self.client.change_parameters_single(
+                    "Contingency",
+                    fields,
+                    (str(label), skip, "", ""),
+                )
+            self.client.run_script_command(f"CTGSolveAll({distributed});")
+
+        for label in labels:
+            self.client.change_parameters_single(
+                "Contingency",
+                fields,
+                (str(label), "NO", "", ""),
+            )
+
+    def _apply_category(self, case: Path, category: str, *, join_active: bool = False) -> None:
+        for path in paths_for_case(self.settings.aux_files, category, str(case)):
+            if join_active:
+                escaped = str(path).replace('"', '""')
+                self.client.run_script_command(f'CTGJoinActiveCTGs(NO,YES,NO,"{escaped}");')
+            else:
+                self._apply_file(path)
+
+    def _apply_file(self, path: str | Path) -> None:
+        self.log(f"Applying file: {path}")
+        apply_input_file(self.client, path)
+
+    def _write_csv(self, path: Path) -> None:
+        result = self.client.get_parameters_multiple("Contingency", CSV_RESULT_FIELDS, "")
+        try:
+            columns = result[1]
+            rows = zip(*columns)
+        except (IndexError, TypeError) as exc:
+            raise PowerWorldError("PowerWorld returned an unexpected contingency result table.") from exc
+        with path.open("w", newline="", encoding="utf-8-sig") as stream:
+            writer = csv.writer(stream)
+            writer.writerow(CSV_RESULT_FIELDS)
+            writer.writerows(rows)
+
+    def _close_safely(self) -> None:
+        try:
+            self.client.close_case()
+        except PowerWorldError as exc:
+            self.log(f"Warning: {exc}")
