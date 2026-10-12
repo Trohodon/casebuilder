@@ -146,6 +146,7 @@ class ContingencyWorkflow:
         self._open_and_condition(case)
         try:
             self.build_contingencies(case, contingencies)
+            self._log_contingency_count()
             self.log(f"Saving prepared contingency case: {destination}")
             self.client.save_case(destination, "PWB", True)
             return destination
@@ -167,6 +168,7 @@ class ContingencyWorkflow:
         self._open_and_condition(case)
         try:
             self.build_contingencies(case, contingencies)
+            self._log_contingency_count()
             escaped = str(destination).replace('"', '""')
             truncate = "YES" if truncate_labels else "NO"
             self.client.run_script_command(f'CTGWriteFilePTI("{escaped}","Name12","{truncate}");')
@@ -199,6 +201,7 @@ class ContingencyWorkflow:
                     self._apply_file(self.resources_dir / "Basecase.aux")
                     self.client.run_script_command('CTGSolve("BASECASE");')
                 self.build_contingencies(case, group)
+                self._log_contingency_count()
                 force_ac = label in {"P1,2,4,7", "LongTerm"}
                 self._configure_analysis(analysis, force_ac=force_ac)
                 self.log(f"Running contingency analysis for {label}.")
@@ -233,18 +236,24 @@ class ContingencyWorkflow:
                 Path(path)
                 for path in paths_for_case(self.settings.aux_files, GENERIC_CONTINGENCY, str(case))
             )
-        if options.n11:
-            required.append(
-                self.resources_dir
-                / ("N-2_Branches&TFMRs.aux" if options.use_model_build else "P2_All_Except_BF.aux")
-            )
-            if options.use_model_build:
-                required.append(self.resources_dir / "P2_All_Except_BF.aux")
-            for category in (JOIN_ACTIVE_CONTINGENCY, GENERIC_CONTINGENCY_POST):
+        if options.n1 or options.n11:
+            required.append(self.resources_dir / "P2_All_Except_BF.aux")
+            for category in (
+                JOIN_ACTIVE_CONTINGENCY,
+                GENERIC_CONTINGENCY_POST,
+                COMMON_STRUCTURE,
+            ):
                 required.extend(
                     Path(path)
                     for path in paths_for_case(self.settings.aux_files, category, str(case))
                 )
+        if options.n11:
+            if options.use_model_build:
+                required.append(self.resources_dir / "N-2_Branches&TFMRs.aux")
+            required.extend(
+                Path(path)
+                for path in paths_for_case(self.settings.aux_files, OPERATING_GUIDE, str(case))
+            )
         if options.long_term_p2:
             required.append(self.resources_dir / "UG_Lines.aux")
         if options.extreme_double_branch:
@@ -253,11 +262,10 @@ class ContingencyWorkflow:
             required.append(self.resources_dir / "EE_DBL_Bus.aux")
         if options.extreme_bus_branch:
             required.append(self.resources_dir / "P2_All_Except_BF.aux")
-        for category in (MANUAL, OPERATING_GUIDE):
-            required.extend(
-                Path(path)
-                for path in paths_for_case(self.settings.aux_files, category, str(case))
-            )
+        required.extend(
+            Path(path)
+            for path in paths_for_case(self.settings.aux_files, MANUAL, str(case))
+        )
         if options.extreme_p1_p7:
             required.extend(
                 Path(path)
@@ -355,9 +363,14 @@ class ContingencyWorkflow:
             else:
                 self.log("Joining active N-1 contingencies to build N-1-1 contingencies.")
                 self.client.run_script_command("CTGJoinActiveCTGs(NO,NO,YES);")
+
+        # Both legacy P1,2,4,7 and P1-7 runs add the P2/non-combinable
+        # stages after creating the base P1 contingencies.
+        if options.n1 or options.n11:
             self._apply_file(self.resources_dir / "P2_All_Except_BF.aux")
             self._apply_category(case, JOIN_ACTIVE_CONTINGENCY)
             self._apply_category(case, GENERIC_CONTINGENCY_POST)
+            self._apply_category(case, COMMON_STRUCTURE)
 
         if options.long_term_p2:
             ug_file = self.resources_dir / "UG_Lines.aux"
@@ -376,7 +389,8 @@ class ContingencyWorkflow:
         if options.extreme_p1_p7:
             self._apply_category(case, COMMON_STRUCTURE, join_active=True)
 
-        self._apply_category(case, OPERATING_GUIDE)
+        if options.n11:
+            self._apply_category(case, OPERATING_GUIDE)
         self._apply_file(self.resources_dir / "Conts_Filters.aux")
 
     def _configure_analysis(self, options: AnalysisOptions, *, force_ac: bool = False) -> None:
@@ -468,6 +482,15 @@ class ContingencyWorkflow:
             writer = csv.writer(stream)
             writer.writerow(CSV_RESULT_FIELDS)
             writer.writerows(rows)
+
+    def _log_contingency_count(self) -> int:
+        result = self.client.get_parameters_multiple("Contingency", ("CTGLabel",), "")
+        try:
+            count = len(result[1][0])
+        except (IndexError, TypeError) as exc:
+            raise PowerWorldError("PowerWorld returned an unexpected contingency list.") from exc
+        self.log(f"Contingencies currently loaded: {count}")
+        return count
 
     def _close_safely(self) -> None:
         try:
