@@ -1,48 +1,111 @@
-"""Per-case text logging for PowerWorld analysis runs."""
+"""Small JSON-backed replacement for the legacy My.Settings values."""
 
 from __future__ import annotations
 
-from datetime import datetime
+from dataclasses import asdict, dataclass, field
+import json
+import os
 from pathlib import Path
-from typing import Callable, TextIO
+
+from .aux_files import empty_aux_selections
+from .distributed import DistributedComputer, DistributedConfig
 
 
-def case_log_path(output_dir: str | Path, case_path: str | Path) -> Path:
-    """Return the legacy-compatible logfile name for one input case."""
-    return Path(output_dir) / f"NERC TPL CA LOGFILE_{Path(case_path).name}.txt"
+DISTRIBUTED_DEFAULTS_VERSION = 1
+DISTRIBUTED_COMPUTERS_V1 = (
+    ("localhost", 2),
+    ("CYCPWJTDist01V", 1),
+    ("IDCPWATDHC10v", 1),
+    ("IDCPWATDHC11v", 1),
+    ("IDCPWATDHC12v", 1),
+    ("IDCPWATDHC13v", 1),
+    ("IDCPWATDHC14v", 1),
+    ("CYCPWATDHC20v", 1),
+    ("CYCPWATDHC21v", 1),
+    ("CYCPWATDHC22v", 1),
+    ("CYCPWATDHC23v", 1),
+    ("CYCPWATDHC24v", 1),
+)
 
 
-class CaseSessionLog:
-    """A fresh, immediately flushed logfile for one case analysis."""
+def default_distributed_computers() -> list[dict[str, object]]:
+    return [{"name": name, "cores": cores} for name, cores in DISTRIBUTED_COMPUTERS_V1]
 
-    def __init__(
-        self,
-        output_dir: str | Path,
-        case_path: str | Path,
-        *,
-        now: Callable[[], datetime] = datetime.now,
-    ) -> None:
-        self.path = case_log_path(output_dir, case_path)
-        self._now = now
-        self._stream: TextIO | None = None
 
-    def __enter__(self) -> CaseSessionLog:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        # Opening with "w" intentionally clears the previous run's logfile.
-        self._stream = self.path.open("w", encoding="utf-8")
-        return self
+def _merge_distributed_computers(
+    existing: list[dict[str, object]],
+    additions: tuple[tuple[str, int], ...],
+) -> list[dict[str, object]]:
+    """Append newly introduced defaults without replacing user-edited workers."""
+    merged = [dict(item) for item in existing]
+    known = {str(item.get("name", "")).strip().casefold() for item in merged}
+    for name, cores in additions:
+        if name.casefold() not in known:
+            merged.append({"name": name, "cores": cores})
+            known.add(name.casefold())
+    return merged
 
-    def write(self, message: object) -> str:
-        if self._stream is None:
-            raise RuntimeError("The case session log is not open.")
-        timestamp = self._now().strftime("%Y-%m-%d %H:%M:%S")
-        lines = str(message).splitlines() or [""]
-        formatted = "\n".join(f"{timestamp}: {line}" for line in lines)
-        self._stream.write(formatted + "\n")
-        self._stream.flush()
-        return formatted
 
-    def __exit__(self, _exc_type, _exc, _traceback) -> None:
-        if self._stream is not None:
-            self._stream.close()
-            self._stream = None
+@dataclass(slots=True)
+class AppSettings:
+    simulator_version: int = 24
+    dc_monitor_percent: int = 80
+    ac_monitor_percent: int = 90
+    contingencies_per_file: int = 80_000
+    use_model_build: bool = False
+    use_distributed: bool = True
+    extreme_double_bus: bool = False
+    extreme_double_branch: bool = False
+    extreme_bus_branch: bool = False
+    extreme_p1_p7: bool = False
+    contingencies_per_process: int = 100
+    distributed_computers: list[dict[str, object]] = field(
+        default_factory=default_distributed_computers
+    )
+    distributed_defaults_version: int = DISTRIBUTED_DEFAULTS_VERSION
+    aux_files: dict[str, list[dict[str, object]]] = field(default_factory=empty_aux_selections)
+
+    def distributed_config(self) -> DistributedConfig:
+        computers = tuple(
+            DistributedComputer(
+                name=str(item.get("name", "")),
+                # Read old settings files that used the confusing "connections" label.
+                connections=int(item.get("cores", item.get("connections", 0))),
+            )
+            for item in self.distributed_computers
+        )
+        return DistributedConfig(self.contingencies_per_process, computers)
+
+
+class SettingsStore:
+    def __init__(self, base_dir: Path | None = None) -> None:
+        if base_dir is None:
+            root = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
+            base_dir = Path(root) / "NERC_TPL_CA_PY" if root else Path.home() / ".nerc_tpl_ca_py"
+        self.base_dir = base_dir
+        self.path = base_dir / "settings.json"
+        self.distributed_aux_path = base_dir / "DistComputing.aux"
+
+    def load(self) -> AppSettings:
+        if not self.path.exists():
+            return AppSettings()
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+            allowed = AppSettings.__dataclass_fields__.keys()
+            settings = AppSettings(**{key: value for key, value in raw.items() if key in allowed})
+            loaded_version = int(raw.get("distributed_defaults_version", 0))
+            if loaded_version < 1:
+                settings.distributed_computers = _merge_distributed_computers(
+                    settings.distributed_computers,
+                    DISTRIBUTED_COMPUTERS_V1,
+                )
+            settings.distributed_defaults_version = DISTRIBUTED_DEFAULTS_VERSION
+            return settings
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            return AppSettings()
+
+    def save(self, settings: AppSettings) -> None:
+        self.base_dir.mkdir(parents=True, exist_ok=True)
+        temporary = self.path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(asdict(settings), indent=2), encoding="utf-8")
+        temporary.replace(self.path)
