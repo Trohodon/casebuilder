@@ -150,7 +150,10 @@ class App(ttk.Frame):
     def _build_method(self, parent: ttk.Frame) -> None:
         frame = ttk.LabelFrame(parent, text="Method", style="Card.TLabelframe")
         frame.pack(fill="x", pady=(8, 0))
-        self.method_var = tk.StringVar(value="model" if self.settings.use_model_build else "join")
+        # Join Active is the validated release workflow. The legacy Model Build
+        # routine is not exposed until its per-N-1 case loop is ported and live-tested.
+        self.method_var = tk.StringVar(value="join")
+        self.settings.use_model_build = False
         ttk.Radiobutton(
             frame,
             text="Use Join Active method",
@@ -158,13 +161,15 @@ class App(ttk.Frame):
             value="join",
             command=self._method_changed,
         ).grid(row=0, column=0, sticky="w", padx=(0, 28))
-        ttk.Radiobutton(
+        self.model_method_radio = ttk.Radiobutton(
             frame,
-            text="Use model build method",
+            text="Use model build method (not available in this test release)",
             variable=self.method_var,
             value="model",
             command=self._method_changed,
-        ).grid(row=0, column=1, sticky="w", padx=(0, 28))
+        )
+        self.model_method_radio.grid(row=0, column=1, sticky="w", padx=(0, 28))
+        self.model_method_radio.state(("disabled",))
         self.write_n1_var = tk.BooleanVar(value=False)
         self.write_n1_check = ttk.Checkbutton(
             frame,
@@ -213,13 +218,15 @@ class App(ttk.Frame):
         ttk.Checkbutton(frame, text="Do not re-report base-case violations with less than the cutoffs", variable=self.no_rereport_var).grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
         self._labeled_entry(frame, "TDF % cutoff", self.tdf_var, 1, 2)
         self._labeled_entry(frame, "Volt % cutoff", self.volt_var, 1, 4)
-        ttk.Radiobutton(
+        self.ac_screen_radio = ttk.Radiobutton(
             frame,
-            text="Use AC Screening",
+            text="Use AC Screening (not available in this test release)",
             variable=self.analysis_mode_var,
             value="ac_screen",
             command=self._analysis_mode_changed,
-        ).grid(row=2, column=0, sticky="w", pady=(4, 0))
+        )
+        self.ac_screen_radio.grid(row=2, column=0, sticky="w", pady=(4, 0))
+        self.ac_screen_radio.state(("disabled",))
         self.screen_tdf_controls = self._labeled_entry(frame, "Screen TDF cutoff", self.screen_tdf_var, 2, 1)
         self.screen_volt_controls = self._labeled_entry(frame, "Screen Volt cutoff", self.screen_volt_var, 2, 3)
         ttk.Checkbutton(
@@ -308,7 +315,10 @@ class App(ttk.Frame):
         self.log.configure(yscrollcommand=scroll.set)
         self.log.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
-        self._write_log("Python conversion ready. Setup screens are available; PowerWorld execution is not connected yet.")
+        self._write_log(
+            "Ready for PowerWorld testing. Join Active, DC with AC verification, Full AC, "
+            "distributed computing, and PWB/AUX/CSV outputs are connected."
+        )
 
     def _build_status_bar(self) -> None:
         ttk.Separator(self, orient="horizontal").pack(side="bottom", fill="x")
@@ -404,6 +414,7 @@ class App(ttk.Frame):
             extreme_p1_p7=use_extreme and self.settings.extreme_p1_p7,
             use_model_build=self.method_var.get() == "model",
             write_n1_models=self.write_n1_var.get(),
+            evaluate_nonexistent=self.evaluate_var.get(),
         )
         if use_extreme and not any(
             (
