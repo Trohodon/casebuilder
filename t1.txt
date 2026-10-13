@@ -1,0 +1,206 @@
+
+"""Convert a PNG image into a multi-resolution Windows ICO file.
+
+Double-click this file to use the graphical interface, or run:
+
+    python PNGtoICO.py input.png [output.ico]
+
+Pillow is the only external dependency:
+
+    py -m pip install Pillow
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
+
+try:
+    from PIL import Image
+except ImportError:
+    root = tk.Tk()
+    root.withdraw()
+    messagebox.showerror(
+        "PNG to ICO",
+        "This converter needs Pillow.\n\nInstall it with:\npy -m pip install Pillow",
+    )
+    raise SystemExit("Pillow is required. Install it with: py -m pip install Pillow")
+
+
+ICON_SIZES = (16, 20, 24, 32, 40, 48, 64, 96, 128, 256)
+NAVY = "#0B2F5B"
+LIGHT_BLUE = "#DCE7F5"
+
+
+def convert_png_to_ico(source: str | Path, destination: str | Path) -> Path:
+    """Convert one PNG into an ICO containing the standard Windows sizes."""
+    source_path = Path(source)
+    destination_path = Path(destination)
+
+    if not source_path.is_file():
+        raise FileNotFoundError(f"PNG file not found: {source_path}")
+    if source_path.suffix.casefold() != ".png":
+        raise ValueError("The input file must be a PNG image.")
+    if destination_path.suffix.casefold() != ".ico":
+        destination_path = destination_path.with_suffix(".ico")
+
+    with Image.open(source_path) as opened:
+        if opened.format != "PNG":
+            raise ValueError("The selected file is not a valid PNG image.")
+        image = opened.convert("RGBA")
+
+    # ICO images must be square. Center non-square artwork on transparency so
+    # it is not stretched or cropped.
+    side = max(image.size)
+    square = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+    left = (side - image.width) // 2
+    top = (side - image.height) // 2
+    square.alpha_composite(image, (left, top))
+
+    # Give Pillow enough source pixels to create a clean 256x256 frame even
+    # when the selected PNG is smaller.
+    if side < 256:
+        square = square.resize((256, 256), Image.Resampling.LANCZOS)
+
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    square.save(
+        destination_path,
+        format="ICO",
+        sizes=[(size, size) for size in ICON_SIZES],
+    )
+    return destination_path
+
+
+class ConverterApp(ttk.Frame):
+    def __init__(self, parent: tk.Tk) -> None:
+        super().__init__(parent, padding=18)
+        self.parent = parent
+        self.source_var = tk.StringVar()
+        self.output_var = tk.StringVar()
+        self.status_var = tk.StringVar(value="Select a PNG image to begin.")
+
+        self.pack(fill="both", expand=True)
+        self._configure_window()
+        self._build_interface()
+
+    def _configure_window(self) -> None:
+        self.parent.title("PNG to ICO")
+        self.parent.geometry("680x300")
+        self.parent.minsize(580, 280)
+
+        style = ttk.Style()
+        try:
+            style.theme_use("vista")
+        except tk.TclError:
+            pass
+        style.configure("TButton", padding=(10, 6))
+        style.configure("Convert.TButton", font=("Segoe UI", 10, "bold"), padding=(16, 8))
+
+    def _build_interface(self) -> None:
+        header = tk.Frame(self, bg=NAVY)
+        header.pack(fill="x", pady=(0, 18))
+        tk.Label(
+            header,
+            text="PNG to Windows Icon",
+            bg=NAVY,
+            fg="white",
+            font=("Segoe UI", 16, "bold"),
+            padx=14,
+            pady=12,
+        ).pack(side="left")
+        tk.Label(
+            header,
+            text="16px through 256px",
+            bg=NAVY,
+            fg=LIGHT_BLUE,
+            font=("Segoe UI", 10),
+            padx=14,
+        ).pack(side="right")
+
+        input_row = ttk.Frame(self)
+        input_row.pack(fill="x", pady=(0, 12))
+        ttk.Label(input_row, text="PNG image:", width=12).pack(side="left")
+        ttk.Entry(input_row, textvariable=self.source_var).pack(
+            side="left", fill="x", expand=True, padx=(0, 8)
+        )
+        ttk.Button(input_row, text="Browse...", command=self._select_png).pack(side="right")
+
+        output_row = ttk.Frame(self)
+        output_row.pack(fill="x", pady=(0, 18))
+        ttk.Label(output_row, text="ICO output:", width=12).pack(side="left")
+        ttk.Entry(output_row, textvariable=self.output_var).pack(
+            side="left", fill="x", expand=True, padx=(0, 8)
+        )
+        ttk.Button(output_row, text="Save As...", command=self._select_output).pack(side="right")
+
+        action_row = ttk.Frame(self)
+        action_row.pack(fill="x")
+        ttk.Label(action_row, textvariable=self.status_var).pack(side="left")
+        ttk.Button(
+            action_row,
+            text="Create ICO",
+            style="Convert.TButton",
+            command=self._convert,
+        ).pack(side="right")
+
+    def _select_png(self) -> None:
+        selected = filedialog.askopenfilename(
+            parent=self.parent,
+            title="Select a PNG image",
+            filetypes=(("PNG images", "*.png"), ("All files", "*.*")),
+        )
+        if not selected:
+            return
+        source = Path(selected)
+        self.source_var.set(str(source))
+        self.output_var.set(str(source.with_suffix(".ico")))
+        self.status_var.set(f"Selected {source.name}")
+
+    def _select_output(self) -> None:
+        current = Path(self.output_var.get()) if self.output_var.get().strip() else None
+        selected = filedialog.asksaveasfilename(
+            parent=self.parent,
+            title="Save Windows icon",
+            defaultextension=".ico",
+            initialdir=str(current.parent) if current else None,
+            initialfile=current.name if current else "icon.ico",
+            filetypes=(("Windows icon", "*.ico"),),
+        )
+        if selected:
+            self.output_var.set(selected)
+
+    def _convert(self) -> None:
+        try:
+            output = convert_png_to_ico(self.source_var.get(), self.output_var.get())
+        except Exception as exc:
+            self.status_var.set("Conversion failed.")
+            messagebox.showerror("PNG to ICO", str(exc), parent=self.parent)
+            return
+
+        self.output_var.set(str(output))
+        self.status_var.set(f"Created {output.name}")
+        messagebox.showinfo(
+            "PNG to ICO",
+            f"Icon created successfully:\n\n{output}",
+            parent=self.parent,
+        )
+
+
+def main() -> int:
+    if len(sys.argv) > 1:
+        source = Path(sys.argv[1])
+        destination = Path(sys.argv[2]) if len(sys.argv) > 2 else source.with_suffix(".ico")
+        output = convert_png_to_ico(source, destination)
+        print(f"Created: {output}")
+        return 0
+
+    root = tk.Tk()
+    ConverterApp(root)
+    root.mainloop()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
