@@ -20,6 +20,10 @@ from core.settings import AppSettings, SettingsStore
 from .distributed_dialog import DistributedDialog
 
 
+NAVY = "#0B2F5B"
+LIGHT_BLUE = "#DCE7F5"
+
+
 TAB_GROUPS = (
     (
         "Manipulating/Combinable/BF Files",
@@ -173,11 +177,31 @@ class AuxSelectionDialog(tk.Toplevel):
         self.transient(parent)
         self.grab_set()
 
-        self.rowconfigure(0, weight=1)
+        self.rowconfigure(1, weight=1)
         self.columnconfigure(0, weight=1)
 
+        header = tk.Frame(self, bg=NAVY)
+        header.grid(row=0, column=0, sticky="ew")
+        tk.Label(
+            header,
+            text="Select AUX Files",
+            bg=NAVY,
+            fg="white",
+            font=("Segoe UI", 15, "bold"),
+            padx=16,
+            pady=9,
+        ).pack(side="left")
+        tk.Label(
+            header,
+            text="AUX and CON assignments by case",
+            bg=NAVY,
+            fg=LIGHT_BLUE,
+            font=("Segoe UI", 10),
+            padx=8,
+        ).pack(side="left")
+
         body = ttk.Frame(self, padding=12)
-        body.grid(row=0, column=0, sticky="nsew")
+        body.grid(row=1, column=0, sticky="nsew")
         body.rowconfigure(1, weight=1)
         body.columnconfigure(0, weight=1)
         ttk.Label(
@@ -188,7 +212,22 @@ class AuxSelectionDialog(tk.Toplevel):
             ),
         ).grid(row=0, column=0, sticky="w", pady=(0, 8))
 
-        notebook = ttk.Notebook(body)
+        style = ttk.Style(self)
+        style.configure(
+            "Aux.TNotebook.Tab",
+            background="#E7EFF8",
+            foreground=NAVY,
+            font=("Segoe UI", 10, "bold"),
+            padding=(12, 7),
+        )
+        style.map(
+            "Aux.TNotebook.Tab",
+            background=[("selected", "#9FC1E4"), ("active", "#C8D9EC")],
+            foreground=[("selected", NAVY), ("active", NAVY)],
+            relief=[("selected", "raised")],
+        )
+
+        notebook = ttk.Notebook(body, style="Aux.TNotebook")
         notebook.grid(row=1, column=0, sticky="nsew")
         self.views: dict[str, _CategoryView] = {}
         for tab_name, categories in TAB_GROUPS:
