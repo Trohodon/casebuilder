@@ -20,6 +20,11 @@ from core.settings import AppSettings, SettingsStore
 from .distributed_dialog import DistributedDialog
 
 
+NAVY = "#0B2F5B"
+LIGHT_BLUE = "#DCE7F5"
+TAB_ACCENTS = ("#2878B5", "#169C8C", "#D18B22")
+
+
 TAB_GROUPS = (
     (
         "Manipulating/Combinable/BF Files",
@@ -51,41 +56,31 @@ class _CategoryView(ttk.LabelFrame):
         self.category = category
         self.cases = cases
         self.entries: list[AuxFileEntry] = []
+        self._checkbox_variables: list[tk.BooleanVar] = []
 
-        case_columns = tuple(f"case_{index}" for index in range(len(cases)))
-
-        self.tree = ttk.Treeview(
+        self.canvas = tk.Canvas(
             self,
-            columns=("path", "exists", "all_cases", *case_columns),
-            show="headings",
-            selectmode="extended",
-            height=4,
+            background="#F7F9FC",
+            highlightthickness=1,
+            highlightbackground="#B8C9DC",
+            height=120,
         )
-        self.tree.heading("path", text="File Name")
-        self.tree.heading("exists", text="File Exists")
-        self.tree.heading("all_cases", text="All cases")
-        self.tree.column("path", width=500, minwidth=260, anchor="w")
-        self.tree.column("exists", width=70, anchor="center")
-        self.tree.column("all_cases", width=80, minwidth=70, anchor="center", stretch=False)
-        for index, (column, case) in enumerate(zip(case_columns, cases)):
-            self.tree.heading(column, text=self._case_heading(case, index))
-            self.tree.column(column, width=145, minwidth=100, anchor="center", stretch=False)
-
-        vertical = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview)
-        horizontal = ttk.Scrollbar(self, orient="horizontal", command=self.tree.xview)
-        self.tree.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
-        self.tree.grid(row=0, column=0, columnspan=4, sticky="nsew")
-        vertical.grid(row=0, column=4, sticky="ns")
-        horizontal.grid(row=1, column=0, columnspan=4, sticky="ew")
-        self.tree.bind("<Button-1>", self._toggle_checkbox)
+        self.table = ttk.Frame(self.canvas, padding=(4, 2))
+        self._table_window = self.canvas.create_window((0, 0), window=self.table, anchor="nw")
+        vertical = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        horizontal = ttk.Scrollbar(self, orient="horizontal", command=self.canvas.xview)
+        self.canvas.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
+        self.table.bind("<Configure>", self._table_configured)
+        self.canvas.grid(row=0, column=0, columnspan=3, sticky="nsew")
+        vertical.grid(row=0, column=3, sticky="ns")
+        horizontal.grid(row=1, column=0, columnspan=3, sticky="ew")
         self.rowconfigure(0, weight=1)
         self.columnconfigure(0, weight=1)
 
         ttk.Button(self, text="Select Files...", command=self._add).grid(row=2, column=0, sticky="w", pady=(8, 0))
-        ttk.Button(self, text="Remove", command=self._remove).grid(row=2, column=1, sticky="w", padx=6, pady=(8, 0))
-        ttk.Label(self, text="Click a box to change whether that AUX file applies.").grid(
-            row=2, column=2, columnspan=2, sticky="e", pady=(8, 0)
-        )
+
+    def _table_configured(self, _event=None) -> None:
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
 
     def _case_heading(self, case: str, index: int) -> str:
         name = case.replace("/", "\\").rstrip("\\").split("\\")[-1]
@@ -105,41 +100,73 @@ class _CategoryView(ttk.LabelFrame):
         return encode_entries(self.entries)
 
     def _refresh(self) -> None:
-        self.tree.delete(*self.tree.get_children())
+        for child in self.table.winfo_children():
+            child.destroy()
+        self._checkbox_variables.clear()
+
+        headers = ("File Name", "File Exists", "All cases") + tuple(
+            self._case_heading(case, index) for index, case in enumerate(self.cases)
+        ) + ("",)
+        for column, text in enumerate(headers):
+            ttk.Label(
+                self.table,
+                text=text,
+                font=("Segoe UI", 9, "bold"),
+                anchor="center" if column else "w",
+            ).grid(row=0, column=column, sticky="ew", padx=6, pady=(3, 5))
+
         for index, entry in enumerate(self.entries):
-            values = [entry.path, "Yes" if entry.exists else "No", self._box(entry.apply_to_all)]
-            values.extend(self._box(entry.applies_to(case)) for case in self.cases)
-            self.tree.insert("", "end", iid=str(index), values=values)
+            row = index + 1
+            ttk.Label(self.table, text=entry.path, width=68, anchor="w").grid(
+                row=row, column=0, sticky="ew", padx=6, pady=3
+            )
+            ttk.Label(
+                self.table,
+                text="Yes" if entry.exists else "No",
+                anchor="center",
+            ).grid(row=row, column=1, sticky="ew", padx=6, pady=3)
 
-    @staticmethod
-    def _box(checked: bool) -> str:
-        return "☑" if checked else "☐"
+            all_var = tk.BooleanVar(value=entry.apply_to_all)
+            self._checkbox_variables.append(all_var)
+            ttk.Checkbutton(
+                self.table,
+                variable=all_var,
+                command=lambda item=index, value=all_var: self._set_all_cases(item, value),
+            ).grid(row=row, column=2, padx=22, pady=3)
 
-    def _toggle_checkbox(self, event) -> str | None:
-        if self.tree.identify_region(event.x, event.y) != "cell":
-            return None
-        row = self.tree.identify_row(event.y)
-        column = self.tree.identify_column(event.x)
-        if not row or not column:
-            return None
-        column_index = int(column.removeprefix("#")) - 1
-        if column_index < 2:
-            return None
+            for case_index, case in enumerate(self.cases):
+                case_var = tk.BooleanVar(value=entry.applies_to(case))
+                self._checkbox_variables.append(case_var)
+                ttk.Checkbutton(
+                    self.table,
+                    variable=case_var,
+                    command=lambda item=index, selected_case=case, value=case_var: (
+                        self._set_case(item, selected_case, value)
+                    ),
+                ).grid(row=row, column=case_index + 3, padx=22, pady=3)
 
-        entry = self.entries[int(row)]
-        if column_index == 2:
-            entry.set_all_cases(not entry.apply_to_all)
-        else:
-            case_index = column_index - 3
-            if case_index >= len(self.cases):
-                return None
-            case = self.cases[case_index]
-            entry.set_case_enabled(case, not entry.applies_to(case), self.cases)
+            ttk.Button(
+                self.table,
+                text="Remove",
+                command=lambda item=index: self._remove(item),
+            ).grid(row=row, column=len(self.cases) + 3, padx=6, pady=3)
+
+        self.table.columnconfigure(0, weight=1, minsize=430)
+        self.table.update_idletasks()
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+    def _set_all_cases(self, index: int, variable: tk.BooleanVar) -> None:
+        self.entries[index].set_all_cases(variable.get())
         self._refresh()
-        return "break"
 
-    def _selected_indexes(self) -> list[int]:
-        return sorted((int(item) for item in self.tree.selection()), reverse=True)
+    def _set_case(
+        self,
+        index: int,
+        case: str,
+        variable: tk.BooleanVar,
+    ) -> None:
+        self.entries[index].set_case_enabled(case, variable.get(), self.cases)
+        self._refresh()
 
     def _add(self) -> None:
         paths = filedialog.askopenfilenames(
@@ -154,9 +181,8 @@ class _CategoryView(ttk.LabelFrame):
                 known.add(path.casefold())
         self._refresh()
 
-    def _remove(self) -> None:
-        for index in self._selected_indexes():
-            del self.entries[index]
+    def _remove(self, index: int) -> None:
+        del self.entries[index]
         self._refresh()
 
 class AuxSelectionDialog(tk.Toplevel):
@@ -167,26 +193,84 @@ class AuxSelectionDialog(tk.Toplevel):
         self.cases = cases
         self.on_saved = on_saved
         self.title("Select AUX Files")
-        self.geometry("1080x760")
-        self.minsize(900, 620)
+        screen_width = self.winfo_screenwidth()
+        screen_height = self.winfo_screenheight()
+        window_width = min(max(1080, int(screen_width * 0.72)), screen_width - 50)
+        window_height = min(max(760, int(screen_height * 0.88)), screen_height - 80)
+        left = max(20, (screen_width - window_width) // 2)
+        top = max(20, (screen_height - window_height) // 2)
+        self.geometry(f"{window_width}x{window_height}+{left}+{top}")
+        self.minsize(min(900, screen_width - 40), min(620, screen_height - 70))
         self.transient(parent)
         self.grab_set()
 
+        self.rowconfigure(1, weight=1)
+        self.columnconfigure(0, weight=1)
+
+        header = tk.Frame(self, bg=NAVY)
+        header.grid(row=0, column=0, sticky="ew")
+        tk.Label(
+            header,
+            text="Select AUX Files",
+            bg=NAVY,
+            fg="white",
+            font=("Segoe UI", 15, "bold"),
+            padx=16,
+            pady=10,
+        ).pack(side="left")
+        tk.Label(
+            header,
+            text="Assign each AUX/CON file to all cases or selected cases",
+            bg=NAVY,
+            fg=LIGHT_BLUE,
+            font=("Segoe UI", 10),
+            padx=8,
+        ).pack(side="left")
+
         body = ttk.Frame(self, padding=12)
-        body.pack(fill="both", expand=True)
+        body.grid(row=1, column=0, sticky="nsew")
+        body.rowconfigure(1, weight=1)
+        body.columnconfigure(0, weight=1)
         ttk.Label(
             body,
             text=(
                 "Choose AUX/CON files, then click All cases or an individual case checkbox. "
                 "Each case column shows the case filename."
             ),
-        ).pack(anchor="w", pady=(0, 8))
-        notebook = ttk.Notebook(body)
-        notebook.pack(fill="both", expand=True)
+        ).grid(row=0, column=0, sticky="w", pady=(0, 8))
+
+        style = ttk.Style(self)
+        style.configure(
+            "Aux.TNotebook",
+            background=LIGHT_BLUE,
+            borderwidth=0,
+            tabmargins=(2, 2, 2, 0),
+        )
+        style.configure(
+            "Aux.TNotebook.Tab",
+            background="#C8D8EB",
+            foreground="#17324D",
+            font=("Segoe UI", 10, "bold"),
+            padding=(14, 8),
+        )
+        style.map(
+            "Aux.TNotebook.Tab",
+            background=[("selected", NAVY), ("active", "#AFC8E3")],
+            foreground=[("selected", "white"), ("active", "#0B2F5B")],
+        )
+
+        notebook = ttk.Notebook(body, style="Aux.TNotebook")
+        notebook.grid(row=1, column=0, sticky="nsew")
+        self._tab_icons: list[tk.PhotoImage] = []
         self.views: dict[str, _CategoryView] = {}
-        for tab_name, categories in TAB_GROUPS:
+        for tab_index, (tab_name, categories) in enumerate(TAB_GROUPS):
             tab = ttk.Frame(notebook, padding=8)
-            notebook.add(tab, text=tab_name)
+            accent = TAB_ACCENTS[tab_index]
+            icon = tk.PhotoImage(width=12, height=12)
+            icon.put(accent, to=(0, 0, 12, 12))
+            self._tab_icons.append(icon)
+            notebook.add(tab, text=tab_name, image=icon, compound="left")
+            tk.Frame(tab, bg=accent, height=5).pack(fill="x", pady=(0, 7))
             for category in categories:
                 view = _CategoryView(tab, category, cases)
                 view.pack(fill="both", expand=True, pady=(0, 7))
@@ -194,7 +278,7 @@ class AuxSelectionDialog(tk.Toplevel):
                 self.views[category] = view
 
         buttons = ttk.Frame(body)
-        buttons.pack(fill="x", pady=(10, 0))
+        buttons.grid(row=2, column=0, sticky="ew", pady=(10, 0))
         ttk.Button(
             buttons,
             text="Configure Computers and Cores...",
