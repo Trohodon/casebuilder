@@ -1,122 +1,223 @@
-"""AUX-file categories and case-specific selection rules."""
-
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Iterable
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
 
-MANUAL = "manual"
-GENERIC_CONTINGENCY = "generic_contingency"
-JOIN_ACTIVE_CONTINGENCY = "join_active_contingency"
-GENERIC_CONTINGENCY_POST = "generic_contingency_post"
-OPERATING_GUIDE = "operating_guide"
-COMMON_STRUCTURE = "common_structure"
+from core.aux_files import (
+    CATEGORY_LABELS,
+    COMMON_STRUCTURE,
+    GENERIC_CONTINGENCY,
+    GENERIC_CONTINGENCY_POST,
+    JOIN_ACTIVE_CONTINGENCY,
+    MANUAL,
+    OPERATING_GUIDE,
+    AuxFileEntry,
+    decode_entries,
+    default_aux_selections,
+    encode_entries,
+)
+from core.settings import AppSettings, SettingsStore
+from .distributed_dialog import DistributedDialog
 
-CATEGORY_LABELS = {
-    MANUAL: "Manipulation",
-    GENERIC_CONTINGENCY: "Generic contingency",
-    JOIN_ACTIVE_CONTINGENCY: "Join-active contingency",
-    GENERIC_CONTINGENCY_POST: "Generic contingency (post)",
-    OPERATING_GUIDE: "Operating guides",
-    COMMON_STRUCTURE: "Common structure",
-}
-CATEGORY_ORDER = tuple(CATEGORY_LABELS)
 
-NETWORK_ROOT = (
-    r"\\mbu.ad.dominionnet.com\data\TRANSMISSION OPERATIONS CENTER\7T\Data2"
-    r"\DESC_Trans_Planning\LTR_Basecases\Current Cases"
+TAB_GROUPS = (
+    (
+        "Manipulating/Combinable/BF Files",
+        (MANUAL, GENERIC_CONTINGENCY),
+    ),
+    (
+        "BF/P2+Switching Files",
+        (JOIN_ACTIVE_CONTINGENCY,),
+    ),
+    (
+        "Non-Combinable/Op Guide Files",
+        (OPERATING_GUIDE, GENERIC_CONTINGENCY_POST, COMMON_STRUCTURE),
+    ),
 )
 
-
-def case_path_key(path: str) -> str:
-    """Normalize Windows case paths for stable saved-selection matching."""
-    return path.strip().replace("/", "\\").casefold()
-
-
-@dataclass(slots=True)
-class AuxFileEntry:
-    path: str
-    apply_to_all: bool = True
-    cases: list[str] = field(default_factory=list)
-
-    @property
-    def exists(self) -> bool:
-        return Path(self.path).is_file()
-
-    def applies_to(self, case_path: str) -> bool:
-        selected = {case_path_key(value) for value in self.cases}
-        return self.apply_to_all or case_path_key(case_path) in selected
-
-    def set_case_enabled(
-        self,
-        case_path: str,
-        enabled: bool,
-        available_cases: Iterable[str],
-    ) -> None:
-        """Change one visible case checkbox without hiding the other selections."""
-        if self.apply_to_all:
-            self.apply_to_all = False
-            self.cases = list(available_cases)
-
-        target = case_path_key(case_path)
-        self.cases = [value for value in self.cases if case_path_key(value) != target]
-        if enabled:
-            self.cases.append(case_path)
-
-    def set_all_cases(self, enabled: bool) -> None:
-        self.apply_to_all = enabled
-        self.cases = []
-
-    def validate(self) -> None:
-        if not self.path.strip():
-            raise ValueError("AUX file paths cannot be blank.")
+SECTION_LABELS = {
+    MANUAL: "Manipulating AUX",
+    GENERIC_CONTINGENCY: "Generic and External Contingency AUX/CON applied BEFORE Join Active AUX (Combinable Conts)",
+    JOIN_ACTIVE_CONTINGENCY: "Generic Contingency AUX/CON applied AFTER Join Active AUX (BF/Non-Combinable/P2+Switching Conts)",
+    OPERATING_GUIDE: "Operating Guide Contingency AUX",
+    GENERIC_CONTINGENCY_POST: "External Conts (Non-Combinable)",
+    COMMON_STRUCTURE: "Common Structure Conts (Non-Combinable)",
+}
 
 
-def empty_aux_selections() -> dict[str, list[dict[str, object]]]:
-    return {category: [] for category in CATEGORY_ORDER}
+class _CategoryView(ttk.LabelFrame):
+    def __init__(self, parent: tk.Misc, category: str, cases: list[str]) -> None:
+        super().__init__(parent, text=SECTION_LABELS[category], padding=8)
+        self.category = category
+        self.cases = cases
+        self.entries: list[AuxFileEntry] = []
 
+        case_columns = tuple(f"case_{index}" for index in range(len(cases)))
 
-def default_aux_selections(case_paths: Iterable[str] = ()) -> dict[str, list[dict[str, object]]]:
-    del case_paths  # Defaults intentionally apply to present and future cases.
-    mapped_generic = Path(r"G:\LTR_Basecases\Current Cases\AUX Cont\External Combinable Conts.aux")
-    generic_path = str(mapped_generic) if mapped_generic.is_file() else (
-        NETWORK_ROOT + r"\AUX Cont\External Combinable Conts.aux"
-    )
-    defaults = empty_aux_selections()
-    paths = {
-        MANUAL: NETWORK_ROOT + r"\AUX Manipulating\2Filters&Monitor_Settings&EquivalenceVACAR&SOCO.aux",
-        GENERIC_CONTINGENCY: generic_path,
-        JOIN_ACTIVE_CONTINGENCY: NETWORK_ROOT + r"\AUX Cont\P2+Switching.aux",
-        GENERIC_CONTINGENCY_POST: NETWORK_ROOT + r"\AUX Cont\External NONCombinable Conts.aux",
-        OPERATING_GUIDE: NETWORK_ROOT + r"\AUX Op Guide\OpGuides_P3&P6.aux",
-    }
-    for category, path in paths.items():
-        defaults[category].append({"path": path, "apply_to_all": True, "cases": []})
-    return defaults
-
-
-def decode_entries(records: Iterable[dict[str, object]]) -> list[AuxFileEntry]:
-    entries: list[AuxFileEntry] = []
-    for record in records:
-        entry = AuxFileEntry(
-            path=str(record.get("path", "")),
-            apply_to_all=bool(record.get("apply_to_all", True)),
-            cases=[str(value) for value in record.get("cases", [])],
+        self.tree = ttk.Treeview(
+            self,
+            columns=("path", "exists", "all_cases", *case_columns),
+            show="headings",
+            selectmode="extended",
+            height=4,
         )
-        entry.validate()
-        entries.append(entry)
-    return entries
+        self.tree.heading("path", text="File Name")
+        self.tree.heading("exists", text="File Exists")
+        self.tree.heading("all_cases", text="All cases")
+        self.tree.column("path", width=500, minwidth=260, anchor="w")
+        self.tree.column("exists", width=70, anchor="center")
+        self.tree.column("all_cases", width=80, minwidth=70, anchor="center", stretch=False)
+        for index, (column, case) in enumerate(zip(case_columns, cases)):
+            self.tree.heading(column, text=self._case_heading(case, index))
+            self.tree.column(column, width=145, minwidth=100, anchor="center", stretch=False)
 
+        vertical = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview)
+        horizontal = ttk.Scrollbar(self, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
+        self.tree.grid(row=0, column=0, columnspan=4, sticky="nsew")
+        vertical.grid(row=0, column=4, sticky="ns")
+        horizontal.grid(row=1, column=0, columnspan=4, sticky="ew")
+        self.tree.bind("<Button-1>", self._toggle_checkbox)
+        self.rowconfigure(0, weight=1)
+        self.columnconfigure(0, weight=1)
 
-def encode_entries(entries: Iterable[AuxFileEntry]) -> list[dict[str, object]]:
-    return [
-        {"path": entry.path, "apply_to_all": entry.apply_to_all, "cases": list(entry.cases)}
-        for entry in entries
-    ]
+        ttk.Button(self, text="Select Files...", command=self._add).grid(row=2, column=0, sticky="w", pady=(8, 0))
+        ttk.Button(self, text="Remove", command=self._remove).grid(row=2, column=1, sticky="w", padx=6, pady=(8, 0))
+        ttk.Label(self, text="Click a box to change whether that AUX file applies.").grid(
+            row=2, column=2, columnspan=2, sticky="e", pady=(8, 0)
+        )
 
+    def _case_heading(self, case: str, index: int) -> str:
+        name = case.replace("/", "\\").rstrip("\\").split("\\")[-1]
+        if sum(
+            other.replace("/", "\\").rstrip("\\").split("\\")[-1].casefold()
+            == name.casefold()
+            for other in self.cases
+        ) > 1:
+            return f"{name} ({index + 1})"
+        return name
 
-def paths_for_case(
-    selections: dict[str, list[dict[str, object]]], category: str, case_path: str
-) -> list[str]:
-    return [entry.path for entry in decode_entries(selections.get(category, [])) if entry.applies_to(case_path)]
+    def set_records(self, records: list[dict[str, object]]) -> None:
+        self.entries = decode_entries(records)
+        self._refresh()
+
+    def records(self) -> list[dict[str, object]]:
+        return encode_entries(self.entries)
+
+    def _refresh(self) -> None:
+        self.tree.delete(*self.tree.get_children())
+        for index, entry in enumerate(self.entries):
+            values = [entry.path, "Yes" if entry.exists else "No", self._box(entry.apply_to_all)]
+            values.extend(self._box(entry.applies_to(case)) for case in self.cases)
+            self.tree.insert("", "end", iid=str(index), values=values)
+
+    @staticmethod
+    def _box(checked: bool) -> str:
+        return "☑" if checked else "☐"
+
+    def _toggle_checkbox(self, event) -> str | None:
+        if self.tree.identify_region(event.x, event.y) != "cell":
+            return None
+        row = self.tree.identify_row(event.y)
+        column = self.tree.identify_column(event.x)
+        if not row or not column:
+            return None
+        column_index = int(column.removeprefix("#")) - 1
+        if column_index < 2:
+            return None
+
+        entry = self.entries[int(row)]
+        if column_index == 2:
+            entry.set_all_cases(not entry.apply_to_all)
+        else:
+            case_index = column_index - 3
+            if case_index >= len(self.cases):
+                return None
+            case = self.cases[case_index]
+            entry.set_case_enabled(case, not entry.applies_to(case), self.cases)
+        self._refresh()
+        return "break"
+
+    def _selected_indexes(self) -> list[int]:
+        return sorted((int(item) for item in self.tree.selection()), reverse=True)
+
+    def _add(self) -> None:
+        paths = filedialog.askopenfilenames(
+            parent=self,
+            title=f"Add {CATEGORY_LABELS[self.category]} files",
+            filetypes=(("PowerWorld AUX/CON", "*.aux *.con"), ("All files", "*.*")),
+        )
+        known = {entry.path.casefold() for entry in self.entries}
+        for path in paths:
+            if path.casefold() not in known:
+                self.entries.append(AuxFileEntry(path=path))
+                known.add(path.casefold())
+        self._refresh()
+
+    def _remove(self) -> None:
+        for index in self._selected_indexes():
+            del self.entries[index]
+        self._refresh()
+
+class AuxSelectionDialog(tk.Toplevel):
+    def __init__(self, parent: tk.Misc, settings: AppSettings, store: SettingsStore, cases: list[str], on_saved=None) -> None:
+        super().__init__(parent)
+        self.settings = settings
+        self.store = store
+        self.cases = cases
+        self.on_saved = on_saved
+        self.title("Select AUX Files")
+        self.geometry("1080x760")
+        self.minsize(900, 620)
+        self.transient(parent)
+        self.grab_set()
+
+        body = ttk.Frame(self, padding=12)
+        body.pack(fill="both", expand=True)
+        ttk.Label(
+            body,
+            text=(
+                "Choose AUX/CON files, then click All cases or an individual case checkbox. "
+                "Each case column shows the case filename."
+            ),
+        ).pack(anchor="w", pady=(0, 8))
+        notebook = ttk.Notebook(body)
+        notebook.pack(fill="both", expand=True)
+        self.views: dict[str, _CategoryView] = {}
+        for tab_name, categories in TAB_GROUPS:
+            tab = ttk.Frame(notebook, padding=8)
+            notebook.add(tab, text=tab_name)
+            for category in categories:
+                view = _CategoryView(tab, category, cases)
+                view.pack(fill="both", expand=True, pady=(0, 7))
+                view.set_records(settings.aux_files.get(category, []))
+                self.views[category] = view
+
+        buttons = ttk.Frame(body)
+        buttons.pack(fill="x", pady=(10, 0))
+        ttk.Button(
+            buttons,
+            text="Configure Computers and Cores...",
+            command=self._open_distributed,
+        ).pack(side="left")
+        ttk.Button(buttons, text="Load Defaults", command=self._load_defaults).pack(side="left", padx=8)
+        ttk.Button(buttons, text="Cancel", command=self.destroy).pack(side="right")
+        ttk.Button(buttons, text="Save", command=self._save).pack(side="right", padx=8)
+
+    def _open_distributed(self) -> None:
+        DistributedDialog(self, self.settings, self.store)
+
+    def _load_defaults(self) -> None:
+        if not messagebox.askyesno("AUX defaults", "Replace current AUX selections with the legacy defaults?", parent=self):
+            return
+        defaults = default_aux_selections(self.cases)
+        for category, view in self.views.items():
+            view.set_records(defaults[category])
+
+    def _save(self) -> None:
+        selections = {category: view.records() for category, view in self.views.items()}
+        self.settings.aux_files = selections
+        self.store.save(self.settings)
+        if self.on_saved is not None:
+            self.on_saved(sum(len(records) for records in selections.values()))
+        self.destroy()
