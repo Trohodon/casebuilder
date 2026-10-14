@@ -1,68 +1,70 @@
-@echo off
-setlocal
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix
+  xmlns="http://wixtoolset.org/schemas/v4/wxs"
+  xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <Package
+    Id="DominionEnergy.NERCTPLCA"
+    Name="NERC TPL CA"
+    Manufacturer="Dominion Energy"
+    Version="$(Version)"
+    Scope="perMachine">
 
-set "REPO_ROOT=%~dp0.."
-set "PUBLISH_DIR=%REPO_ROOT%\dist\NERC TPL CA"
-set "APP_EXE=%PUBLISH_DIR%\NERC TPL CA.exe"
-set "ICON_PATH=%REPO_ROOT%\NERC_TPL_CA_PY\assets\app.ico"
-set "OUTPUT_DIR=%~dp0output"
-set "PACKAGE_SOURCE=%~dp0Package.wxs"
-set "VERSION=%~1"
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
 
-if not defined VERSION set "VERSION=1.0.0"
+    <Icon Id="NercTplCa.ico" SourceFile="$(IconPath)" />
+    <Property Id="ARPPRODUCTICON" Value="NercTplCa.ico" />
 
-if not exist "%APP_EXE%" (
-    echo ERROR: The PyInstaller application was not found:
-    echo   %APP_EXE%
-    echo.
-    echo Build the onedir EXE first, then run this script again.
-    exit /b 1
-)
+    <!-- Running this MSI again after installation opens Repair/Remove. -->
+    <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
+    <UIRef Id="WixUI_ErrorProgressText" />
 
-if not exist "%ICON_PATH%" (
-    echo ERROR: The installer icon was not found:
-    echo   %ICON_PATH%
-    exit /b 1
-)
+    <StandardDirectory Id="ProgramFiles6432Folder">
+      <Directory Id="CompanyFolder" Name="Dominion Energy">
+        <Directory Id="INSTALLFOLDER" Name="NERC TPL CA" />
+      </Directory>
+    </StandardDirectory>
 
-where wix.exe >nul 2>nul
-if %errorlevel% equ 0 (
-    set "WIX=wix.exe"
-) else if exist "%USERPROFILE%\.dotnet\tools\wix.exe" (
-    set "WIX=%USERPROFILE%\.dotnet\tools\wix.exe"
-) else (
-    echo ERROR: WiX was not found in PATH or %USERPROFILE%\.dotnet\tools.
-    exit /b 1
-)
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ProgramMenuAppFolder" Name="NERC TPL CA" />
+    </StandardDirectory>
 
-if not exist "%OUTPUT_DIR%" mkdir "%OUTPUT_DIR%"
+    <StandardDirectory Id="DesktopFolder" />
 
-"%WIX%" extension list | findstr /I /C:"WixToolset.UI.wixext 7.0.0" >nul
-if errorlevel 1 (
-    echo ERROR: The WiX 7 UI extension is not installed.
-    echo Run this once, then run this build again:
-    echo   wix extension add WixToolset.UI.wixext/7.0.0
-    exit /b 1
-)
+    <Feature Id="MainFeature" Title="NERC TPL CA" Level="1">
+      <Files Include="$(PublishDir)\**" Directory="INSTALLFOLDER" />
 
-echo Building NERC TPL CA version %VERSION%...
-"%WIX%" build ^
-    -arch x64 ^
-    -ext WixToolset.UI.wixext ^
-    -culture en-US ^
-    -d "Version=%VERSION%" ^
-    -d "PublishDir=%PUBLISH_DIR%" ^
-    -d "IconPath=%ICON_PATH%" ^
-    -out "%OUTPUT_DIR%\NERC_TPL_CA_%VERSION%_x64.msi" ^
-    "%PACKAGE_SOURCE%"
-
-if errorlevel 1 (
-    echo.
-    echo MSI build failed.
-    exit /b 1
-)
-
-echo.
-echo MSI created successfully:
-echo   %OUTPUT_DIR%\NERC_TPL_CA_%VERSION%_x64.msi
-exit /b 0
+      <Component
+        Id="ApplicationShortcuts"
+        Directory="INSTALLFOLDER"
+        Guid="{15770A20-AF64-4E63-B227-79C7149271FD}">
+        <Shortcut
+          Id="StartMenuShortcut"
+          Directory="ProgramMenuAppFolder"
+          Name="NERC TPL CA"
+          Description="NERC TPL Contingency Analysis"
+          Target="[INSTALLFOLDER]NERC TPL CA.exe"
+          WorkingDirectory="INSTALLFOLDER"
+          Icon="NercTplCa.ico" />
+        <Shortcut
+          Id="DesktopShortcut"
+          Directory="DesktopFolder"
+          Name="NERC TPL CA"
+          Description="NERC TPL Contingency Analysis"
+          Target="[INSTALLFOLDER]NERC TPL CA.exe"
+          WorkingDirectory="INSTALLFOLDER"
+          Icon="NercTplCa.ico" />
+        <RemoveFolder
+          Id="RemoveProgramMenuAppFolder"
+          Directory="ProgramMenuAppFolder"
+          On="uninstall" />
+        <RegistryValue
+          Root="HKLM"
+          Key="Software\Dominion Energy\NERC TPL CA"
+          Name="Installed"
+          Type="integer"
+          Value="1"
+          KeyPath="yes" />
+      </Component>
+    </Feature>
+  </Package>
+</Wix>
