@@ -1,125 +1,83 @@
-@echo off
-setlocal
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product
+    Id="*"
+    UpgradeCode="{0D561477-26ED-435E-B168-361CE5172164}"
+    Name="NERC TPL CA"
+    Manufacturer="Dominion Energy"
+    Language="1033"
+    Version="$(var.Version)">
 
-set "REPO_ROOT=%~dp0.."
-set "PUBLISH_DIR=%REPO_ROOT%\dist\NERC TPL CA"
-set "APP_EXE=%PUBLISH_DIR%\NERC TPL CA.exe"
-set "ICON_PATH=%REPO_ROOT%\NERC_TPL_CA_PY\assets\app.ico"
-set "OUTPUT_DIR=%~dp0output"
-set "INTERMEDIATE_DIR=%~dp0obj"
-set "PACKAGE_SOURCE=%~dp0Package.wxs"
-set "HARVEST_SOURCE=%INTERMEDIATE_DIR%\HarvestedFiles.wxs"
-set "VERSION=%~1"
+    <Package
+      InstallerVersion="500"
+      Compressed="yes"
+      InstallScope="perMachine"
+      Platform="x64" />
 
-if not defined VERSION set "VERSION=1.0.0"
+    <MajorUpgrade
+      DowngradeErrorMessage="A newer version of NERC TPL CA is already installed." />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
 
-if not exist "%APP_EXE%" (
-    echo ERROR: The PyInstaller application was not found:
-    echo   %APP_EXE%
-    echo.
-    echo Build the onedir EXE first, then run this script again.
-    exit /b 1
-)
+    <Icon Id="NercTplCa.ico" SourceFile="$(var.IconPath)" />
+    <Property Id="ARPPRODUCTICON" Value="NercTplCa.ico" />
 
-if not exist "%ICON_PATH%" (
-    echo ERROR: The installer icon was not found:
-    echo   %ICON_PATH%
-    exit /b 1
-)
+    <!-- Running this MSI again after installation opens Repair/Remove. -->
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+    <UIRef Id="WixUI_InstallDir" />
+    <UIRef Id="WixUI_ErrorProgressText" />
 
-set "WIX_BIN="
-where candle.exe >nul 2>nul
-if %errorlevel% equ 0 (
-    for %%I in (candle.exe) do set "CANDLE=%%~$PATH:I"
-    for %%I in (light.exe) do set "LIGHT=%%~$PATH:I"
-    for %%I in (heat.exe) do set "HEAT=%%~$PATH:I"
-) else if exist "%ProgramFiles(x86)%\WiX Toolset v3.14\bin\candle.exe" (
-    set "WIX_BIN=%ProgramFiles(x86)%\WiX Toolset v3.14\bin"
-) else if exist "%ProgramFiles%\WiX Toolset v3.14\bin\candle.exe" (
-    set "WIX_BIN=%ProgramFiles%\WiX Toolset v3.14\bin"
-) else (
-    echo ERROR: WiX Toolset 3.14 was not found.
-    echo Install WiX 3.14 or add its bin folder to PATH.
-    exit /b 1
-)
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="CompanyFolder" Name="Dominion Energy">
+          <Directory Id="INSTALLFOLDER" Name="NERC TPL CA" />
+        </Directory>
+      </Directory>
 
-if defined WIX_BIN (
-    set "CANDLE=%WIX_BIN%\candle.exe"
-    set "LIGHT=%WIX_BIN%\light.exe"
-    set "HEAT=%WIX_BIN%\heat.exe"
-)
+      <Directory Id="CommonProgramsFolder">
+        <Directory Id="ProgramMenuAppFolder" Name="NERC TPL CA" />
+      </Directory>
 
-if not exist "%CANDLE%" (
-    echo ERROR: candle.exe was not found.
-    exit /b 1
-)
-if not exist "%LIGHT%" (
-    echo ERROR: light.exe was not found.
-    exit /b 1
-)
-if not exist "%HEAT%" (
-    echo ERROR: heat.exe was not found.
-    exit /b 1
-)
+      <Directory Id="CommonDesktopFolder" />
+    </Directory>
 
-if not exist "%OUTPUT_DIR%" mkdir "%OUTPUT_DIR%"
-if not exist "%INTERMEDIATE_DIR%" mkdir "%INTERMEDIATE_DIR%"
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component
+        Id="ApplicationShortcuts"
+        Guid="{15770A20-AF64-4E63-B227-79C7149271FD}"
+        Win64="yes">
+        <Shortcut
+          Id="StartMenuShortcut"
+          Directory="ProgramMenuAppFolder"
+          Name="NERC TPL CA"
+          Description="NERC TPL Contingency Analysis"
+          Target="[INSTALLFOLDER]NERC TPL CA.exe"
+          WorkingDirectory="INSTALLFOLDER"
+          Icon="NercTplCa.ico" />
+        <Shortcut
+          Id="DesktopShortcut"
+          Directory="CommonDesktopFolder"
+          Name="NERC TPL CA"
+          Description="NERC TPL Contingency Analysis"
+          Target="[INSTALLFOLDER]NERC TPL CA.exe"
+          WorkingDirectory="INSTALLFOLDER"
+          Icon="NercTplCa.ico" />
+        <RemoveFolder
+          Id="RemoveProgramMenuAppFolder"
+          Directory="ProgramMenuAppFolder"
+          On="uninstall" />
+        <RegistryValue
+          Root="HKLM"
+          Key="Software\Dominion Energy\NERC TPL CA"
+          Name="Installed"
+          Type="integer"
+          Value="1"
+          KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
 
-echo Collecting the PyInstaller application files...
-"%HEAT%" dir "%PUBLISH_DIR%" ^
-    -nologo ^
-    -cg ApplicationFiles ^
-    -dr INSTALLFOLDER ^
-    -ag ^
-    -scom ^
-    -sfrag ^
-    -srd ^
-    -sreg ^
-    -platform x64 ^
-    -var var.PublishDir ^
-    -out "%HARVEST_SOURCE%"
-
-if errorlevel 1 (
-    echo.
-    echo WiX file collection failed.
-    exit /b 1
-)
-
-pushd "%INTERMEDIATE_DIR%"
-
-echo Compiling the WiX installer...
-"%CANDLE%" -nologo -arch x64 ^
-    "-dVersion=%VERSION%" ^
-    "-dPublishDir=%PUBLISH_DIR%" ^
-    "-dIconPath=%ICON_PATH%" ^
-    "%PACKAGE_SOURCE%" ^
-    "%HARVEST_SOURCE%"
-
-if errorlevel 1 (
-    popd
-    echo.
-    echo WiX compilation failed.
-    exit /b 1
-)
-
-echo Linking the MSI with its install and Repair/Remove screens...
-"%LIGHT%" -nologo ^
-    -ext WixUIExtension ^
-    -cultures:en-us ^
-    -out "%OUTPUT_DIR%\NERC_TPL_CA_%VERSION%_x64.msi" ^
-    Package.wixobj ^
-    HarvestedFiles.wixobj
-
-if errorlevel 1 (
-    popd
-    echo.
-    echo MSI linking failed.
-    exit /b 1
-)
-
-popd
-
-echo.
-echo MSI created successfully:
-echo   %OUTPUT_DIR%\NERC_TPL_CA_%VERSION%_x64.msi
-exit /b 0
+    <Feature Id="MainFeature" Title="NERC TPL CA" Level="1">
+      <ComponentGroupRef Id="ApplicationFiles" />
+      <ComponentRef Id="ApplicationShortcuts" />
+    </Feature>
+  </Product>
+</Wix>
